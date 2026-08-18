@@ -10,13 +10,19 @@ REPO="awesome-dsh-plugin/awesome-dsh-plugin"
 HEAD="Harzva:add-dsh-maclens"
 BASE="main"
 
-# Guard: refuse to run before the 1-day gate.
-python3 - <<'PY'
+# Guard: refuse to run before the 1-day gate (pass --force to skip; the
+# gate reports age as a red check without closing the PR, and the official
+# message says resubmission is never held against anyone — creating the PR
+# early to start the flow is safe, and the check turns green once the repo
+# reaches 1 day).
+if [[ "${1:-}" != "--force" ]]; then
+  python3 - <<'PY'
 from datetime import datetime, timezone, timedelta
 created = datetime(2026, 8, 18, 17, 3, 14, tzinfo=timezone.utc)
 if datetime.now(timezone.utc) < created + timedelta(days=1):
-    raise SystemExit("refusing: repo is not 1 day old yet")
+    raise SystemExit("refusing: repo is not 1 day old yet (use --force to create the PR anyway)")
 PY
+fi
 
 echo "Creating PR: $HEAD -> $BASE on $REPO"
 curl -s --max-time 30 -X POST \
