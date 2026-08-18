@@ -89,3 +89,18 @@ jobs:
           if (!y.includes('dsh-maclens')) throw new Error('patch does not reference dsh-maclens');
           console.log('cordis.patch.yml OK');
           "
+      - name: npm pack contains the binary and sources (no build artifacts)
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json || pnpm pack --dry-run --json > /tmp/pack.json
+          node -e "
+          const fs = require('fs');
+          const d = JSON.parse(fs.readFileSync('/tmp/pack.json', 'utf8'));
+          const entry = Array.isArray(d) ? d[0] : d;
+          const files = entry.files.map(f => f.path);
+          for (const need of ['bin/maclens','lib/index.js','swift/Sources/MaclensBridge/main.swift','cordis.patch.yml']) {
+            if (!files.includes(need)) throw new Error('missing from package: ' + need);
+          }
+          const leaked = files.filter(f => f.includes('swift/.build') || f.includes('node_modules'));
+          if (leaked.length) throw new Error('build artifacts leaked into package: ' + leaked.join(', '));
+          console.log('npm pack contents OK (' + files.length + ' files, no .build leakage)');
+          "
