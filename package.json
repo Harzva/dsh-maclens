@@ -1,6 +1,6 @@
 {
   "name": "dsh-maclens",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bridge Apple's on-device Vision framework (macOS) into DeepSeek Harness: OCR, image classification, face detection, and document layout as local dsh tools. No network, no API key, no daemon.",
   "license": "MIT",
   "type": "module",
@@ -13,7 +13,8 @@
   "files": [
     "lib",
     "bin",
-    "swift",
+    "swift/Package.swift",
+    "swift/Sources",
     "scripts",
     "cordis.patch.yml",
     "README.md",
