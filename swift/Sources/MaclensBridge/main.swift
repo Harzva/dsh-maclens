@@ -25,6 +25,8 @@ struct Args {
     var languages: [String] = ["zh-Hans", "en-US"]
     var top: Int = 5
     var maxLines: Int? = nil
+    var slice: Bool = false
+    var sliceHeight: Int = 4096
 }
 
 func parseArgs(_ argv: [String]) -> Args? {
@@ -50,6 +52,12 @@ func parseArgs(_ argv: [String]) -> Args? {
             i += 1
             guard i < argv.count, let n = Int(argv[i]), n > 0 else { return nil }
             args.maxLines = n
+        case "--slice":
+            args.slice = true
+        case "--slice-height":
+            i += 1
+            guard i < argv.count, let n = Int(argv[i]), n > 0 else { return nil }
+            args.sliceHeight = n
         default:
             if token.hasPrefix("-") { return nil }
             positional.append(token)
@@ -84,6 +92,119 @@ func jsonString(_ value: Any) -> String {
         return "{\"error\":\"json serialization failed\"}"
     }
     return String(data: data, encoding: .utf8) ?? "{}"
+}
+
+// MARK: - Tall-image slicing
+
+/// Crop a horizontal strip of `height` pixels starting at `y` (top-left
+/// origin, pixel units) from `image` and return it as a new CGImage.
+func cropStrip(from image: CGImage, y: Int, height: Int) -> CGImage? {
+    let w = image.width
+    let h = image.height
+    let safeH = max(0, min(height, h - y))
+    guard safeH > 0 else { return nil }
+    return image.cropping(to: CGRect(x: 0, y: y, width: w, height: safeH))
+}
+
+/// OCR a tall image by splitting it into overlapping horizontal strips.
+/// Vision can miss or mis-order text on very tall screenshots (its internal
+/// downscale loses small text), so we run each strip separately and stitch
+/// the results back into image coordinates. Returns the same shape as
+/// runOCR, plus a `sliced` flag.
+func runOCRWithSlicing(image: CGImage, languages: [String], maxLines: Int?, sliceHeight: Int) throws -> [String: Any] {
+    let h = image.height
+    let w = image.width
+    if h <= sliceHeight {
+        var plain = try runOCR(image: image, languages: languages, maxLines: maxLines)
+        plain["sliced"] = false
+        return plain
+    }
+
+    // Overlap by 10% so a line that straddles a cut is seen whole in at
+    // least one strip.
+    let overlap = max(1, sliceHeight / 10)
+    let step = max(1, sliceHeight - overlap)
+    var strips: [(offsetY: Int, stripH: Int)] = []
+    var y = 0
+    while y < h {
+        let stripH = min(sliceHeight, h - y)
+        strips.append((y, stripH))
+        if y + stripH >= h { break }
+        y += step
+    }
+
+    var allLines: [[String: Any]] = []
+    var textParts: [String] = []
+    for strip in strips {
+        guard let cropped = cropStrip(from: image, y: strip.offsetY, height: strip.stripH) else { continue }
+        let partial = try runOCR(image: cropped, languages: languages, maxLines: nil)
+        let lines = partial["lines"] as! [[String: Any]]
+        // Vision bboxes are normalized to the *strip*, origin bottom-left.
+        // Convert to whole-image normalized coords, origin top-left to match
+        // the single-shot output convention we document (Vision's native
+        // bottom-left origin is confusing; keep one convention everywhere).
+        let stripH = Double(strip.stripH)
+        let imgH = Double(h)
+        for line in lines {
+            var box = line["bbox"] as! [String: Any]
+            let bx = box["x"] as! Double
+            let by = box["y"] as! Double
+            let bw = box["width"] as! Double
+            let bh = box["height"] as! Double
+            // strip-local bottom-left -> whole-image top-left
+            let topInStrip = 1.0 - (by + bh)
+            let topInImage = (Double(strip.offsetY) + topInStrip * stripH) / imgH
+            box["x"] = bx
+            box["y"] = topInImage
+            box["width"] = bw
+            box["height"] = bh * (stripH / imgH)
+            var newLine = line
+            newLine["bbox"] = box
+            newLine["slice"] = strip.offsetY
+            allLines.append(newLine)
+        }
+        let text = partial["full_text"] as? String ?? ""
+        if !text.isEmpty { textParts.append(text) }
+    }
+
+    // De-duplicate lines that appear in the overlap of two strips: a line
+    // whose text matches another at a nearly identical y (within the overlap
+    // band) is the same physical line seen twice — keep the first copy.
+    // Identical text at clearly different heights is intentional repetition
+    // in the image and is preserved.
+    var unique: [[String: Any]] = []
+    let sortedLines = allLines.sorted { (a, b) in
+        let aBox = a["bbox"] as! [String: Any]
+        let bBox = b["bbox"] as! [String: Any]
+        return (aBox["y"] as! Double) < (bBox["y"] as! Double)
+    }
+    let overlapFraction = Double(overlap) / Double(sliceHeight)
+    for line in sortedLines {
+        let text = line["text"] as? String ?? ""
+        let box = line["bbox"] as! [String: Any]
+        let y = box["y"] as! Double
+        let duplicate = unique.contains { existing in
+            guard (existing["text"] as? String) == text else { return false }
+            let eBox = existing["bbox"] as! [String: Any]
+            return abs((eBox["y"] as! Double) - y) < overlapFraction
+        }
+        if duplicate { continue }
+        unique.append(line)
+    }
+    if let maxLines = maxLines, unique.count > maxLines {
+        unique = Array(unique.prefix(maxLines))
+    }
+
+    return [
+        "task": "ocr",
+        "language": languages,
+        "full_text": textParts.joined(separator: "\n"),
+        "lines": unique,
+        "line_count": unique.count,
+        "truncated": maxLines != nil && unique.count >= (maxLines ?? 0),
+        "sliced": true,
+        "slice_count": strips.count,
+    ]
 }
 
 // MARK: - OCR
@@ -187,13 +308,8 @@ func runFaces(image: CGImage) throws -> [String: Any] {
 
 // MARK: - Document parsing (OCR + layout summary)
 
-func runDocument(image: CGImage, languages: [String], maxLines: Int? = nil) throws -> [String: Any] {
-    let ocr = try runOCR(image: image, languages: languages, maxLines: maxLines)
-    var result = ocr
-    result["task"] = "document"
-    // Estimate simple layout regions from text lines: group lines into
-    // left/right columns when their x ranges barely overlap.
-    let lines = (result["lines"] as! [[String: Any]])
+/// Build the simple left/right column layout summary from OCR lines.
+func layoutFor(image: CGImage, lines: [[String: Any]]) -> [String: Any] {
     let width = Double(image.width)
     var leftCol: [String] = []
     var rightCol: [String] = []
@@ -205,13 +321,20 @@ func runDocument(image: CGImage, languages: [String], maxLines: Int? = nil) thro
         if mid < 0.5 { leftCol.append(line["text"] as! String) }
         else { rightCol.append(line["text"] as! String) }
     }
-    result["layout"] = [
+    return [
         "columns": [
             ["side": "left", "text": leftCol.joined(separator: " ")],
             ["side": "right", "text": rightCol.joined(separator: " ")],
         ].filter { !($0["text"] as! String).isEmpty },
         "image_dimensions": ["width": width, "height": Double(image.height)],
     ]
+}
+
+func runDocument(image: CGImage, languages: [String], maxLines: Int? = nil) throws -> [String: Any] {
+    let ocr = try runOCR(image: image, languages: languages, maxLines: maxLines)
+    var result = ocr
+    result["task"] = "document"
+    result["layout"] = layoutFor(image: image, lines: result["lines"] as! [[String: Any]])
     return result
 }
 
@@ -238,7 +361,7 @@ func runDescribe(image: CGImage, languages: [String], top: Int, maxLines: Int?) 
 func main() -> Int32 {
     let argv = CommandLine.arguments
     guard let args = parseArgs(argv) else {
-        print(jsonString(["error": "usage: maclens <ocr|classify|faces|document|describe> --image <path> [--languages a,b] [--top N] [--max-lines N]"]))
+        print(jsonString(["error": "usage: maclens <ocr|classify|faces|document|describe> --image <path> [--languages a,b] [--top N] [--max-lines N] [--slice] [--slice-height N]"]))
         return 2
     }
     let validTasks = ["ocr", "classify", "faces", "document", "describe"]
@@ -251,15 +374,42 @@ func main() -> Int32 {
         let result: [String: Any]
         switch args.task {
         case "ocr":
-            result = try runOCR(image: image, languages: args.languages, maxLines: args.maxLines)
+            if args.slice {
+                result = try runOCRWithSlicing(image: image, languages: args.languages, maxLines: args.maxLines, sliceHeight: args.sliceHeight)
+            } else {
+                result = try runOCR(image: image, languages: args.languages, maxLines: args.maxLines)
+            }
         case "classify":
             result = try runClassify(image: image, top: args.top)
         case "faces":
             result = try runFaces(image: image)
         case "document":
-            result = try runDocument(image: image, languages: args.languages, maxLines: args.maxLines)
+            if args.slice {
+                let sliced = try runOCRWithSlicing(image: image, languages: args.languages, maxLines: args.maxLines, sliceHeight: args.sliceHeight)
+                var doc = sliced
+                doc["task"] = "document"
+                doc["layout"] = try layoutFor(image: image, lines: sliced["lines"] as! [[String: Any]])
+                result = doc
+            } else {
+                result = try runDocument(image: image, languages: args.languages, maxLines: args.maxLines)
+            }
         case "describe":
-            result = try runDescribe(image: image, languages: args.languages, top: args.top, maxLines: args.maxLines)
+            if args.slice {
+                let sliced = try runOCRWithSlicing(image: image, languages: args.languages, maxLines: args.maxLines, sliceHeight: args.sliceHeight)
+                let classify = try runClassify(image: image, top: args.top)
+                let faces = try runFaces(image: image)
+                let layout = try layoutFor(image: image, lines: sliced["lines"] as! [[String: Any]])
+                result = [
+                    "task": "describe",
+                    "image_dimensions": ["width": Double(image.width), "height": Double(image.height)],
+                    "ocr": sliced,
+                    "classification": classify,
+                    "faces": faces,
+                    "layout": layout,
+                ]
+            } else {
+                result = try runDescribe(image: image, languages: args.languages, top: args.top, maxLines: args.maxLines)
+            }
         default:
             print(jsonString(["error": "unknown task: \(args.task)"]))
             return 2
