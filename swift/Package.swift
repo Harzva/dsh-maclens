@@ -10,6 +10,10 @@ let package = Package(
         .executableTarget(
             name: "MaclensBridge",
             path: "Sources/MaclensBridge"
-        )
+        ),
+        .testTarget(
+            name: "MaclensBridgeTests",
+            path: "Tests/MaclensBridgeTests"
+        ),
     ]
 )

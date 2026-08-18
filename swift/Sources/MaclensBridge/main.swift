@@ -241,6 +241,11 @@ func main() -> Int32 {
         print(jsonString(["error": "usage: maclens <ocr|classify|faces|document|describe> --image <path> [--languages a,b] [--top N] [--max-lines N]"]))
         return 2
     }
+    let validTasks = ["ocr", "classify", "faces", "document", "describe"]
+    guard validTasks.contains(args.task) else {
+        print(jsonString(["error": "unknown task: \(args.task)"]))
+        return 2
+    }
     do {
         let image = try loadCGImage(path: args.imagePath)
         let result: [String: Any]
