@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  swift-build:
+    name: Swift bridge build + smoke test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build MaclensBridge (release)
+        run: swift build -c release --package-path swift
+      - name: Smoke test — OCR on a generated image
+        run: |
+          BIN=swift/.build/release/MaclensBridge
+          # draw a tiny PNG with "hello" text using built-in tools, then OCR it
+          python3 - <<'PY'
+          import struct, zlib
+
+          def chunk(t, d):
+              c = struct.pack('>I', len(d)) + t + d
+              return c + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+
+          w = h = 64
+          raw = b''
+          for y in range(h):
+              raw += b'\x00'
+              for x in range(w):
+                  # white background, black block in top-left area as "text-like" shape
+                  on = (x < 16 and y < 16)
+                  raw += b'\x00' if on else b'\xff' * 3
+          ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
+          png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr)
+                 + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+          open('/tmp/maclens-smoke.png', 'wb').write(png)
+          PY
+          "$BIN" ocr --image /tmp/maclens-smoke.png > /tmp/ocr.json
+          python3 -c "import json; d=json.load(open('/tmp/ocr.json')); assert 'task' in d and 'lines' in d, d; print('OCR smoke OK, lines:', d['line_count'])"
+      - name: Smoke test — classify, faces, describe
+        run: |
+          BIN=swift/.build/release/MaclensBridge
+          "$BIN" classify --image /tmp/maclens-smoke.png --top 3 > /tmp/cls.json
+          "$BIN" faces --image /tmp/maclens-smoke.png > /tmp/faces.json
+          "$BIN" describe --image /tmp/maclens-smoke.png --top 2 > /tmp/desc.json
+          python3 - <<'PY'
+          import json
+          for f in ('/tmp/cls.json', '/tmp/faces.json', '/tmp/desc.json'):
+              d = json.load(open(f))
+              assert 'error' not in d, d
+          print('classify/faces/describe smoke OK')
+          PY
+      - name: Smoke test — missing file error path
+        run: |
+          BIN=swift/.build/release/MaclensBridge
+          set +e
+          "$BIN" ocr --image /tmp/definitely-missing.png > /tmp/miss.json 2>&1
+          code=$?
+          set -e
+          test $code -eq 1
+          python3 -c "import json; d=json.load(open('/tmp/miss.json')); assert 'error' in d and 'does not exist' in d['error'], d; print('missing-file error OK')"
+
+  plugin-load:
+    name: Plugin entry loads and registers tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Plugin module loads and registers 5 tools
+        run: |
+          node --input-type=module -e "
+          import { apply, name } from './lib/index.js';
+          if (name !== 'dsh-maclens') throw new Error('bad name: ' + name);
+          const tools = [];
+          apply({ tools: { register: (t) => tools.push(t) } });
+          const expected = ['maclens_ocr','maclens_classify','maclens_faces','maclens_document','maclens_describe'];
+          for (const e of expected) if (!tools.some(t => t.name === e)) throw new Error('missing tool: ' + e);
+          console.log('plugin registers', tools.length, 'tools OK');
+          "
+      - name: cordis.patch.yml is valid YAML and names the package
+        run: |
+          node -e "
+          const fs = require('fs');
+          const y = fs.readFileSync('cordis.patch.yml', 'utf8');
+          if (!y.includes('dsh-maclens')) throw new Error('patch does not reference dsh-maclens');
+          console.log('cordis.patch.yml OK');
+          "
