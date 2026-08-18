@@ -4,6 +4,11 @@ All notable changes to dsh-maclens are documented here. The format is based on [
 
 ## [Unreleased]
 
+### Changed
+
+- Docs rework: README (en/zh) now dual-audience — human quick-start plus a precise agent contract (TL;DR, exact commands, tool schemas, JSON output/error contracts). Added `AGENTS.md` for agents.
+- Tool descriptions rewritten to be action-oriented for models; error messages now distinguish binary-missing (with fix), usage (exit 2), runtime failure (with image path), and non-JSON output.
+
 ## [0.1.2] - 2026-08-19
 
 ### Added
