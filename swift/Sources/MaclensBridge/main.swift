@@ -5,10 +5,11 @@
 // spawns this binary; nothing here talks to the network.
 //
 // Usage:
-//   maclens ocr      --image <path> [--languages zh-Hans,en-US]
+//   maclens ocr      --image <path> [--languages zh-Hans,en-US] [--max-lines N]
 //   maclens classify --image <path> [--top 5]
 //   maclens faces    --image <path>
-//   maclens document --image <path> [--languages zh-Hans,en-US]
+//   maclens document --image <path> [--languages zh-Hans,en-US] [--max-lines N]
+//   maclens describe --image <path> [--languages zh-Hans,en-US] [--top 5] [--max-lines N]
 //
 // Output: one JSON object on stdout, errors as {"error": "..."} with exit 1.
 
@@ -23,6 +24,7 @@ struct Args {
     var imagePath: String = ""
     var languages: [String] = ["zh-Hans", "en-US"]
     var top: Int = 5
+    var maxLines: Int? = nil
 }
 
 func parseArgs(_ argv: [String]) -> Args? {
@@ -44,6 +46,10 @@ func parseArgs(_ argv: [String]) -> Args? {
             i += 1
             guard i < argv.count, let n = Int(argv[i]) else { return nil }
             args.top = n
+        case "--max-lines":
+            i += 1
+            guard i < argv.count, let n = Int(argv[i]), n > 0 else { return nil }
+            args.maxLines = n
         default:
             if token.hasPrefix("-") { return nil }
             positional.append(token)
@@ -59,6 +65,9 @@ func parseArgs(_ argv: [String]) -> Args? {
 
 func loadCGImage(path: String) throws -> CGImage {
     let url = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: path) else {
+        throw NSError(domain: "maclens", code: 3, userInfo: [NSLocalizedDescriptionKey: "file does not exist: \(path)"])
+    }
     guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
         throw NSError(domain: "maclens", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot open image: \(path)"])
     }
@@ -79,7 +88,7 @@ func jsonString(_ value: Any) -> String {
 
 // MARK: - OCR
 
-func runOCR(image: CGImage, languages: [String]) throws -> [String: Any] {
+func runOCR(image: CGImage, languages: [String], maxLines: Int? = nil) throws -> [String: Any] {
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = true
@@ -115,12 +124,17 @@ func runOCR(image: CGImage, languages: [String]) throws -> [String: Any] {
         let bx = (b["bbox"] as! [String: Any])["x"] as! Double
         return ax < bx
     }
+    if let maxLines = maxLines, lines.count > maxLines {
+        lines = Array(lines.prefix(maxLines))
+        fullText = Array(fullText.prefix(maxLines))
+    }
     return [
         "task": "ocr",
         "language": languages,
         "full_text": fullText.joined(separator: "\n"),
         "lines": lines,
         "line_count": lines.count,
+        "truncated": maxLines != nil && lines.count >= (maxLines ?? 0),
     ]
 }
 
@@ -173,8 +187,8 @@ func runFaces(image: CGImage) throws -> [String: Any] {
 
 // MARK: - Document parsing (OCR + layout summary)
 
-func runDocument(image: CGImage, languages: [String]) throws -> [String: Any] {
-    let ocr = try runOCR(image: image, languages: languages)
+func runDocument(image: CGImage, languages: [String], maxLines: Int? = nil) throws -> [String: Any] {
+    let ocr = try runOCR(image: image, languages: languages, maxLines: maxLines)
     var result = ocr
     result["task"] = "document"
     // Estimate simple layout regions from text lines: group lines into
@@ -201,12 +215,30 @@ func runDocument(image: CGImage, languages: [String]) throws -> [String: Any] {
     return result
 }
 
+// MARK: - Combined describe (OCR + classify + faces + layout)
+
+func runDescribe(image: CGImage, languages: [String], top: Int, maxLines: Int?) throws -> [String: Any] {
+    let ocr = try runOCR(image: image, languages: languages, maxLines: maxLines)
+    let classify = try runClassify(image: image, top: top)
+    let faces = try runFaces(image: image)
+    let doc = try runDocument(image: image, languages: languages, maxLines: maxLines)
+    let layout = doc["layout"] as? [String: Any] ?? [:]
+    return [
+        "task": "describe",
+        "image_dimensions": layout["image_dimensions"] ?? [:],
+        "ocr": ocr,
+        "classification": classify,
+        "faces": faces,
+        "layout": layout,
+    ]
+}
+
 // MARK: - Main
 
 func main() -> Int32 {
     let argv = CommandLine.arguments
     guard let args = parseArgs(argv) else {
-        print(jsonString(["error": "usage: maclens <ocr|classify|faces|document> --image <path> [--languages a,b] [--top N]"]))
+        print(jsonString(["error": "usage: maclens <ocr|classify|faces|document|describe> --image <path> [--languages a,b] [--top N] [--max-lines N]"]))
         return 2
     }
     do {
@@ -214,13 +246,15 @@ func main() -> Int32 {
         let result: [String: Any]
         switch args.task {
         case "ocr":
-            result = try runOCR(image: image, languages: args.languages)
+            result = try runOCR(image: image, languages: args.languages, maxLines: args.maxLines)
         case "classify":
             result = try runClassify(image: image, top: args.top)
         case "faces":
             result = try runFaces(image: image)
         case "document":
-            result = try runDocument(image: image, languages: args.languages)
+            result = try runDocument(image: image, languages: args.languages, maxLines: args.maxLines)
+        case "describe":
+            result = try runDescribe(image: image, languages: args.languages, top: args.top, maxLines: args.maxLines)
         default:
             print(jsonString(["error": "unknown task: \(args.task)"]))
             return 2
