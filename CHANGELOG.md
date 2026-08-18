@@ -4,6 +4,16 @@ All notable changes to dsh-maclens are documented here. The format is based on [
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-19
+
+### Added
+
+- `maclens_describe` combined read (OCR + classification + faces + layout).
+- `--slice` / `--slice-height` tall-image slicing for long screenshots, exposed on `ocr`, `document`, and `describe`.
+- `--max-lines` OCR cap and explicit missing-file errors.
+- Swift Testing suite and GitHub Actions CI (Swift build + smoke tests + plugin load check).
+- README (en/zh), CHANGELOG, SECURITY.
+
 ## [0.1.1] - 2026-08-19
 
 ### Fixed
@@ -21,5 +31,6 @@ All notable changes to dsh-maclens are documented here. The format is based on [
 - `--slice` / `--slice-height` tall-image slicing for long screenshots.
 - Swift Testing suite and GitHub Actions CI.
 
+[0.1.2]: https://github.com/Harzva/dsh-maclens/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Harzva/dsh-maclens/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Harzva/dsh-maclens/releases/tag/v0.1.0
