@@ -1,0 +1,5 @@
+# dsh bundle layer: mount the dsh-maclens plugin (lib/index.js registers the
+# maclens_* tools backed by the local Swift Vision bridge).
+- insert:
+    - id: dsh-maclens
+      name: 'dsh-maclens'

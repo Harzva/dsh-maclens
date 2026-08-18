@@ -1,0 +1,15 @@
+# Swift build artifacts
+swift/.build/
+.swiftpm/
+*.o
+*.dia
+*.d
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
+
+# Logs / temp
+*.log
